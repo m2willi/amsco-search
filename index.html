@@ -116,12 +116,33 @@
     padding: .05em .15em;
     border-radius: 2px;
   }
+  .search-hints {
+    max-width: 600px;
+    margin: .5rem auto 0;
+    display: flex;
+    gap: .5rem;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .search-hints span {
+    font-size: .65rem;
+    background: rgba(255,255,255,.12);
+    padding: .15rem .5rem;
+    border-radius: 4px;
+    color: rgba(255,255,255,.55);
+  }
   #result-count {
     max-width: 700px;
     margin: .8rem auto 0;
     padding: 0 .75rem;
     font-size: .8rem;
     color: #888;
+  }
+  .search-mode {
+    font-size: .7rem;
+    color: #aaa;
+    font-style: italic;
+    margin-left: .5rem;
   }
 </style>
 </head>
@@ -135,6 +156,11 @@
       <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
     </svg>
     <input type="text" id="search" placeholder="Search the textbook..." autocomplete="off" disabled>
+  </div>
+  <div class="search-hints">
+    <span>"exact phrase"</span>
+    <span>word1 NEAR word2</span>
+    <span>keyword</span>
   </div>
 </header>
 
@@ -188,6 +214,86 @@
     debounceTimer = setTimeout(doSearch, 200);
   });
 
+  // Detect search mode from query
+  function parseQuery(query) {
+    // Exact phrase: "ottoman empire"
+    const phraseMatch = query.match(/^"(.+)"$/);
+    if (phraseMatch) {
+      return { mode: 'phrase', phrase: phraseMatch[1] };
+    }
+    // Proximity: word1 NEAR word2  or  word1 NEAR/50 word2
+    const nearMatch = query.match(/^(.+?)\s+NEAR(?:\/(\d+))?\s+(.+)$/i);
+    if (nearMatch) {
+      return { mode: 'near', wordA: nearMatch[1].trim(), wordB: nearMatch[3].trim(), distance: parseInt(nearMatch[2]) || 200 };
+    }
+    // Default: keyword search via lunr
+    return { mode: 'keyword', raw: query };
+  }
+
+  // Exact phrase search - case-insensitive substring match on raw text
+  function searchPhrase(phrase) {
+    const lower = phrase.toLowerCase();
+    const results = [];
+    for (const p of pages) {
+      const text = p.text.toLowerCase();
+      let count = 0;
+      let pos = 0;
+      while ((pos = text.indexOf(lower, pos)) !== -1) {
+        count++;
+        pos++;
+      }
+      if (count > 0) {
+        results.push({ page: p.page, score: count });
+      }
+    }
+    results.sort((a, b) => b.score - a.score);
+    return results;
+  }
+
+  // Proximity search - find pages where wordA and wordB appear within N chars
+  function searchNear(wordA, wordB, distance) {
+    const lowerA = wordA.toLowerCase();
+    const lowerB = wordB.toLowerCase();
+    const results = [];
+    for (const p of pages) {
+      const text = p.text.toLowerCase();
+      // Find all positions of wordA
+      const positionsA = [];
+      let pos = 0;
+      while ((pos = text.indexOf(lowerA, pos)) !== -1) {
+        positionsA.push(pos);
+        pos++;
+      }
+      if (positionsA.length === 0) continue;
+      // Find all positions of wordB
+      const positionsB = [];
+      pos = 0;
+      while ((pos = text.indexOf(lowerB, pos)) !== -1) {
+        positionsB.push(pos);
+        pos++;
+      }
+      if (positionsB.length === 0) continue;
+      // Check if any pair is within distance
+      let bestDist = Infinity;
+      let nearCount = 0;
+      for (const a of positionsA) {
+        for (const b of positionsB) {
+          const d = Math.abs(a - b);
+          if (d <= distance) {
+            nearCount++;
+            if (d < bestDist) bestDist = d;
+          }
+        }
+      }
+      if (nearCount > 0) {
+        results.push({ page: p.page, score: nearCount, bestDist: bestDist });
+      }
+    }
+    // Sort by closest distance first, then by count
+    results.sort((a, b) => a.bestDist - b.bestDist || b.score - a.score);
+    return results;
+  }
+
   function doSearch() {
     const query = searchInput.value.trim();
     if (!query) {
@@ -199,43 +305,60 @@
     }
     statusEl.style.display = 'none';
 
-    let results;
-    try {
-      // Try lunr query; fall back to wildcard search
-      results = idx.search(query);
-      if (results.length === 0) {
-        results = idx.search(query + '*');
-      }
-    } catch(e) {
-      // If lunr can't parse the query, escape it and try a wildcard
+    const parsed = parseQuery(query);
+    let matchedPages; // array of { page, score }
+    let highlightTerms_list;
+    let modeLabel;
+
+    if (parsed.mode === 'phrase') {
+      modeLabel = 'Exact phrase';
+      matchedPages = searchPhrase(parsed.phrase);
+      highlightTerms_list = [parsed.phrase.toLowerCase()];
+    } else if (parsed.mode === 'near') {
+      modeLabel = 'Proximity (within ' + parsed.distance + ' chars)';
+      matchedPages = searchNear(parsed.wordA, parsed.wordB, parsed.distance);
+      highlightTerms_list = [parsed.wordA.toLowerCase(), parsed.wordB.toLowerCase()];
+    } else {
+      modeLabel = 'Keyword';
+      // Use lunr for keyword search
+      let results;
       try {
-        const escaped = query.replace(/[:\*\~\^\+\-]/g, '');
-        results = idx.search(escaped + '*');
-      } catch(e2) {
-        results = [];
+        results = idx.search(query);
+        if (results.length === 0) {
+          results = idx.search(query + '*');
+        }
+      } catch(e) {
+        try {
+          const escaped = query.replace(/[:\*\~\^\+\-]/g, '');
+          results = idx.search(escaped + '*');
+        } catch(e2) {
+          results = [];
+        }
       }
+      matchedPages = results.map(r => ({ page: parseInt(r.ref), score: r.score }));
+      highlightTerms_list = query.toLowerCase().split(/\s+/).filter(Boolean);
     }
 
-    countEl.textContent = results.length + ' result' + (results.length !== 1 ? 's' : '') + ' found';
+    countEl.innerHTML = matchedPages.length + ' result' + (matchedPages.length !== 1 ? 's' : '')
+                      + ' found <span class="search-mode">(' + modeLabel + ')</span>';
 
-    if (results.length === 0) {
+    if (matchedPages.length === 0) {
       resultsEl.innerHTML = '<div class="result"><div class="snippet">No results found. Try different keywords.</div></div>';
       return;
     }
 
     // Build result cards
-    const queryTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
     let html = '';
-    const limit = Math.min(results.length, 100);
+    const limit = Math.min(matchedPages.length, 100);
     for (let i = 0; i < limit; i++) {
-      const r = results[i];
-      const pageNum = r.ref;
+      const r = matchedPages[i];
+      const pageNum = r.page;
       const text = pageMap[pageNum] || '';
-      const snippet = extractSnippet(text, queryTerms);
+      const snippet = extractSnippet(text, highlightTerms_list);
       html += '<a class="result" href="amsco.pdf#page=' + pageNum + '" target="_blank">'
             + '<div class="result-header">'
             + '<span class="page-badge">Page ' + pageNum + '</span>'
-            + '<span class="score">score: ' + r.score.toFixed(2) + '</span>'
+            + '<span class="score">' + (parsed.mode === 'near' ? r.bestDist + ' chars apart' : 'score: ' + r.score.toFixed(2)) + '</span>'
             + '</div>'
             + '<div class="snippet">' + snippet + '</div>'
             + '<div class="open-hint">Click to open PDF on this page</div>'
