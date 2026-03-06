@@ -144,6 +144,69 @@
     font-style: italic;
     margin-left: .5rem;
   }
+  .definition-card {
+    max-width: 700px;
+    margin: .75rem auto;
+    padding: 0 .75rem;
+  }
+  .definition-card .card {
+    background: white;
+    border-left: 4px solid #1a237e;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  .definition-card .word {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #1a237e;
+  }
+  .definition-card .phonetic {
+    font-size: .85rem;
+    color: #888;
+    margin-left: .4rem;
+    font-weight: 400;
+  }
+  .definition-card .pos {
+    display: inline-block;
+    font-size: .7rem;
+    font-style: italic;
+    color: #666;
+    background: #eee;
+    padding: .1rem .4rem;
+    border-radius: 3px;
+    margin: .5rem 0 .3rem;
+  }
+  .definition-card .def {
+    font-size: .9rem;
+    line-height: 1.5;
+    color: #333;
+    margin: .2rem 0 .2rem .6rem;
+  }
+  .definition-card .def::before {
+    content: '\2022';
+    margin-right: .4rem;
+    color: #999;
+  }
+  .definition-card .example {
+    font-size: .82rem;
+    color: #777;
+    font-style: italic;
+    margin-left: 1.2rem;
+  }
+  .definition-card .source {
+    font-size: .65rem;
+    color: #aaa;
+    margin-top: .5rem;
+  }
+  .definition-card .loading {
+    color: #888;
+    font-size: .9rem;
+  }
+  .definition-card .error {
+    color: #c62828;
+    font-size: .9rem;
+  }
 </style>
 </head>
 <body>
@@ -158,6 +221,7 @@
     <input type="text" id="search" placeholder="Search the textbook..." autocomplete="off" disabled>
   </div>
   <div class="search-hints">
+    <span>?define word</span>
     <span>"exact phrase"</span>
     <span>word1 NEAR word2</span>
     <span>keyword</span>
@@ -165,6 +229,7 @@
 </header>
 
 <div id="status">Loading textbook data...</div>
+<div id="definition"></div>
 <div id="result-count"></div>
 <div id="results"></div>
 
@@ -214,8 +279,15 @@
     debounceTimer = setTimeout(doSearch, 200);
   });
 
+  const definitionEl = document.getElementById('definition');
+
   // Detect search mode from query
   function parseQuery(query) {
+    // Definition lookup: ?word or ?phrase
+    const defineMatch = query.match(/^\?(.+)$/);
+    if (defineMatch) {
+      return { mode: 'define', term: defineMatch[1].trim() };
+    }
     // Exact phrase: "ottoman empire"
     const phraseMatch = query.match(/^"(.+)"$/);
     if (phraseMatch) {
@@ -228,6 +300,58 @@
     }
     // Default: keyword search via lunr
     return { mode: 'keyword', raw: query };
+  }
+
+  // Fetch definition from Free Dictionary API
+  let defineAbort = null;
+  function fetchDefinition(term) {
+    if (defineAbort) defineAbort.abort();
+    defineAbort = new AbortController();
+
+    definitionEl.innerHTML = '<div class="definition-card"><div class="card"><span class="loading">Looking up "' + escapeHTML(term) + '"...</span></div></div>';
+
+    // Try the first word for multi-word phrases, since the API only supports single words
+    const words = term.split(/\s+/);
+    const lookupWord = words[0];
+
+    fetch('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(lookupWord), { signal: defineAbort.signal })
+      .then(r => {
+        if (!r.ok) throw new Error('not found');
+        return r.json();
+      })
+      .then(data => {
+        const entry = data[0];
+        let html = '<div class="definition-card"><div class="card">';
+        html += '<span class="word">' + escapeHTML(entry.word) + '</span>';
+        if (entry.phonetic) {
+          html += '<span class="phonetic">' + escapeHTML(entry.phonetic) + '</span>';
+        }
+
+        // Show up to 3 meanings
+        const meanings = entry.meanings.slice(0, 3);
+        for (const m of meanings) {
+          html += '<div class="pos">' + escapeHTML(m.partOfSpeech) + '</div>';
+          const defs = m.definitions.slice(0, 2);
+          for (const d of defs) {
+            html += '<div class="def">' + escapeHTML(d.definition) + '</div>';
+            if (d.example) {
+              html += '<div class="example">"' + escapeHTML(d.example) + '"</div>';
+            }
+          }
+        }
+
+        html += '<div class="source">via Free Dictionary API</div>';
+        html += '</div></div>';
+        definitionEl.innerHTML = html;
+      })
+      .catch(err => {
+        if (err.name === 'AbortError') return;
+        definitionEl.innerHTML = '<div class="definition-card"><div class="card"><span class="error">No dictionary definition found for "' + escapeHTML(term) + '"</span></div></div>';
+      });
+  }
+
+  function escapeHTML(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   // Exact phrase search - case-insensitive substring match on raw text
@@ -299,6 +423,7 @@
     if (!query) {
       resultsEl.innerHTML = '';
       countEl.textContent = '';
+      definitionEl.innerHTML = '';
       statusEl.style.display = '';
       statusEl.textContent = 'Type a keyword to search across ' + pages.length + ' pages.';
       return;
@@ -310,15 +435,32 @@
     let highlightTerms_list;
     let modeLabel;
 
-    if (parsed.mode === 'phrase') {
+    // Clear or fetch definition
+    if (parsed.mode === 'define') {
+      fetchDefinition(parsed.term);
+      // Also search textbook for the term
+      modeLabel = 'Definition + textbook';
+      matchedPages = searchPhrase(parsed.term);
+      if (matchedPages.length === 0) {
+        // Try keyword fallback
+        try {
+          const results = idx.search(parsed.term);
+          matchedPages = results.map(r => ({ page: parseInt(r.ref), score: r.score }));
+        } catch(e) { matchedPages = []; }
+      }
+      highlightTerms_list = parsed.term.toLowerCase().split(/\s+/).filter(Boolean);
+    } else if (parsed.mode === 'phrase') {
+      definitionEl.innerHTML = '';
       modeLabel = 'Exact phrase';
       matchedPages = searchPhrase(parsed.phrase);
       highlightTerms_list = [parsed.phrase.toLowerCase()];
     } else if (parsed.mode === 'near') {
+      definitionEl.innerHTML = '';
       modeLabel = 'Proximity (within ' + parsed.distance + ' chars)';
       matchedPages = searchNear(parsed.wordA, parsed.wordB, parsed.distance);
       highlightTerms_list = [parsed.wordA.toLowerCase(), parsed.wordB.toLowerCase()];
     } else {
+      definitionEl.innerHTML = '';
       modeLabel = 'Keyword';
       // Use lunr for keyword search
       let results;
