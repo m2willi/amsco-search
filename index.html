@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AMSCO AP World History - Search</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f5f5f5;
+    color: #222;
+    min-height: 100vh;
+  }
+  header {
+    background: #1a237e;
+    color: white;
+    padding: 1.2rem 1rem 1rem;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    box-shadow: 0 2px 8px rgba(0,0,0,.2);
+  }
+  header h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: .7rem;
+    text-align: center;
+  }
+  .search-wrap {
+    max-width: 600px;
+    margin: 0 auto;
+    position: relative;
+  }
+  #search {
+    width: 100%;
+    padding: .7rem 1rem .7rem 2.4rem;
+    font-size: 1rem;
+    border: none;
+    border-radius: 8px;
+    outline: none;
+    background: rgba(255,255,255,.15);
+    color: white;
+    transition: background .2s;
+  }
+  #search::placeholder { color: rgba(255,255,255,.5); }
+  #search:focus { background: rgba(255,255,255,.25); }
+  .search-icon {
+    position: absolute;
+    left: .75rem;
+    top: 50%;
+    transform: translateY(-50%);
+    opacity: .5;
+    pointer-events: none;
+  }
+  #status {
+    text-align: center;
+    padding: 2rem 1rem;
+    color: #666;
+    font-size: .95rem;
+  }
+  #results {
+    max-width: 700px;
+    margin: 1rem auto;
+    padding: 0 .75rem;
+  }
+  .result {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    background: white;
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    margin-bottom: .7rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    cursor: pointer;
+    transition: box-shadow .15s, transform .15s;
+  }
+  .result:hover {
+    box-shadow: 0 3px 12px rgba(0,0,0,.15);
+    transform: translateY(-1px);
+  }
+  .open-hint {
+    font-size: .7rem;
+    color: #999;
+    margin-top: .4rem;
+  }
+  .result-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: .4rem;
+  }
+  .page-badge {
+    background: #1a237e;
+    color: white;
+    font-size: .75rem;
+    font-weight: 700;
+    padding: .15rem .55rem;
+    border-radius: 4px;
+    margin-right: .5rem;
+    white-space: nowrap;
+  }
+  .score {
+    font-size: .7rem;
+    color: #999;
+    margin-left: auto;
+  }
+  .snippet {
+    font-size: .88rem;
+    line-height: 1.55;
+    color: #444;
+    word-break: break-word;
+  }
+  .snippet mark {
+    background: #fff176;
+    padding: .05em .15em;
+    border-radius: 2px;
+  }
+  #result-count {
+    max-width: 700px;
+    margin: .8rem auto 0;
+    padding: 0 .75rem;
+    font-size: .8rem;
+    color: #888;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AMSCO AP World History Modern</h1>
+  <div class="search-wrap">
+    <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+    <input type="text" id="search" placeholder="Search the textbook..." autocomplete="off" disabled>
+  </div>
+</header>
+
+<div id="status">Loading textbook data...</div>
+<div id="result-count"></div>
+<div id="results"></div>
+
+<script src="https://unpkg.com/lunr/lunr.js"></script>
+<script>
+(function() {
+  const searchInput = document.getElementById('search');
+  const statusEl    = document.getElementById('status');
+  const resultsEl   = document.getElementById('results');
+  const countEl     = document.getElementById('result-count');
+
+  let idx, pages, pageMap;
+  let debounceTimer;
+
+  // Load data and build index
+  fetch('data.json')
+    .then(r => {
+      if (!r.ok) throw new Error('Could not load data.json. Run extract.py first.');
+      return r.json();
+    })
+    .then(data => {
+      pages = data;
+      pageMap = {};
+      pages.forEach(p => pageMap[p.page] = p.text);
+
+      statusEl.textContent = 'Building search index...';
+
+      // Build lunr index
+      idx = lunr(function() {
+        this.ref('page');
+        this.field('text');
+        // Increase position metadata for snippet extraction
+        this.metadataWhitelist = ['position'];
+        pages.forEach(p => this.add(p));
+      });
+
+      statusEl.textContent = 'Type a keyword to search across ' + pages.length + ' pages.';
+      searchInput.disabled = false;
+      searchInput.focus();
+    })
+    .catch(err => {
+      statusEl.textContent = 'Error: ' + err.message;
+    });
+
+  searchInput.addEventListener('input', function() {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(doSearch, 200);
+  });
+
+  function doSearch() {
+    const query = searchInput.value.trim();
+    if (!query) {
+      resultsEl.innerHTML = '';
+      countEl.textContent = '';
+      statusEl.style.display = '';
+      statusEl.textContent = 'Type a keyword to search across ' + pages.length + ' pages.';
+      return;
+    }
+    statusEl.style.display = 'none';
+
+    let results;
+    try {
+      // Try lunr query; fall back to wildcard search
+      results = idx.search(query);
+      if (results.length === 0) {
+        results = idx.search(query + '*');
+      }
+    } catch(e) {
+      // If lunr can't parse the query, escape it and try a wildcard
+      try {
+        const escaped = query.replace(/[:\*\~\^\+\-]/g, '');
+        results = idx.search(escaped + '*');
+      } catch(e2) {
+        results = [];
+      }
+    }
+
+    countEl.textContent = results.length + ' result' + (results.length !== 1 ? 's' : '') + ' found';
+
+    if (results.length === 0) {
+      resultsEl.innerHTML = '<div class="result"><div class="snippet">No results found. Try different keywords.</div></div>';
+      return;
+    }
+
+    // Build result cards
+    const queryTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    let html = '';
+    const limit = Math.min(results.length, 100);
+    for (let i = 0; i < limit; i++) {
+      const r = results[i];
+      const pageNum = r.ref;
+      const text = pageMap[pageNum] || '';
+      const snippet = extractSnippet(text, queryTerms);
+      html += '<a class="result" href="amsco.pdf#page=' + pageNum + '" target="_blank">'
+            + '<div class="result-header">'
+            + '<span class="page-badge">Page ' + pageNum + '</span>'
+            + '<span class="score">score: ' + r.score.toFixed(2) + '</span>'
+            + '</div>'
+            + '<div class="snippet">' + snippet + '</div>'
+            + '<div class="open-hint">Click to open PDF on this page</div>'
+            + '</a>';
+    }
+    resultsEl.innerHTML = html;
+  }
+
+  function extractSnippet(text, terms) {
+    // Find best window around query terms
+    const lower = text.toLowerCase();
+    let bestPos = -1;
+    let bestCount = 0;
+
+    // Score each term occurrence and pick the region with most term density
+    for (const term of terms) {
+      let pos = 0;
+      while ((pos = lower.indexOf(term, pos)) !== -1) {
+        // Count how many terms appear within 200 chars of this position
+        let count = 0;
+        for (const t of terms) {
+          const window = lower.substring(Math.max(0, pos - 100), pos + 100);
+          if (window.includes(t)) count++;
+        }
+        if (count > bestCount || (count === bestCount && bestPos === -1)) {
+          bestCount = count;
+          bestPos = pos;
+        }
+        pos++;
+      }
+    }
+
+    if (bestPos === -1) bestPos = 0;
+
+    // Extract window
+    const radius = 200;
+    let start = Math.max(0, bestPos - radius);
+    let end = Math.min(text.length, bestPos + radius);
+
+    // Snap to word boundaries
+    if (start > 0) {
+      const sp = text.indexOf(' ', start);
+      if (sp !== -1 && sp < start + 30) start = sp + 1;
+    }
+    if (end < text.length) {
+      const sp = text.lastIndexOf(' ', end);
+      if (sp > end - 30) end = sp;
+    }
+
+    let snippet = text.substring(start, end);
+    // Clean up whitespace
+    snippet = snippet.replace(/\s+/g, ' ').trim();
+
+    if (start > 0) snippet = '...' + snippet;
+    if (end < text.length) snippet += '...';
+
+    // Highlight terms
+    snippet = highlightTerms(snippet, terms);
+
+    return snippet;
+  }
+
+  function highlightTerms(text, terms) {
+    // Escape HTML first
+    text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Sort terms longest first to avoid partial replacements
+    const sorted = terms.slice().sort((a, b) => b.length - a.length);
+    for (const term of sorted) {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp('(' + escaped + ')', 'gi');
+      text = text.replace(re, '<mark>$1</mark>');
+    }
+    return text;
+  }
+})();
+</script>
+</body>
+</html>
