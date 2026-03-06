@@ -221,7 +221,7 @@
     <input type="text" id="search" placeholder="Search the textbook..." autocomplete="off" disabled>
   </div>
   <div class="search-hints">
-    <span>?define word</span>
+    <span>?define word or phrase</span>
     <span>"exact phrase"</span>
     <span>word1 NEAR word2</span>
     <span>keyword</span>
@@ -302,51 +302,88 @@
     return { mode: 'keyword', raw: query };
   }
 
-  // Fetch definition from Free Dictionary API
+  // Fetch definition: try Dictionary API for single words, Wikipedia for phrases/fallback
   let defineAbort = null;
   function fetchDefinition(term) {
     if (defineAbort) defineAbort.abort();
     defineAbort = new AbortController();
+    const signal = defineAbort.signal;
 
     definitionEl.innerHTML = '<div class="definition-card"><div class="card"><span class="loading">Looking up "' + escapeHTML(term) + '"...</span></div></div>';
 
-    // Try the first word for multi-word phrases, since the API only supports single words
-    const words = term.split(/\s+/);
-    const lookupWord = words[0];
+    const isPhrase = term.trim().includes(' ');
 
-    fetch('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(lookupWord), { signal: defineAbort.signal })
+    if (isPhrase) {
+      // Go straight to Wikipedia for multi-word phrases
+      fetchWikipedia(term, signal);
+    } else {
+      // Try dictionary first, fall back to Wikipedia
+      fetch('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(term), { signal })
+        .then(r => {
+          if (!r.ok) throw new Error('not found');
+          return r.json();
+        })
+        .then(data => {
+          renderDictionary(data[0]);
+        })
+        .catch(err => {
+          if (err.name === 'AbortError') return;
+          // Fall back to Wikipedia
+          fetchWikipedia(term, signal);
+        });
+    }
+  }
+
+  function renderDictionary(entry) {
+    let html = '<div class="definition-card"><div class="card">';
+    html += '<span class="word">' + escapeHTML(entry.word) + '</span>';
+    if (entry.phonetic) {
+      html += '<span class="phonetic">' + escapeHTML(entry.phonetic) + '</span>';
+    }
+    const meanings = entry.meanings.slice(0, 3);
+    for (const m of meanings) {
+      html += '<div class="pos">' + escapeHTML(m.partOfSpeech) + '</div>';
+      const defs = m.definitions.slice(0, 2);
+      for (const d of defs) {
+        html += '<div class="def">' + escapeHTML(d.definition) + '</div>';
+        if (d.example) {
+          html += '<div class="example">"' + escapeHTML(d.example) + '"</div>';
+        }
+      }
+    }
+    html += '<div class="source">via Free Dictionary API</div>';
+    html += '</div></div>';
+    definitionEl.innerHTML = html;
+  }
+
+  function fetchWikipedia(term, signal) {
+    const url = 'https://en.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(term);
+    fetch(url, { signal })
       .then(r => {
         if (!r.ok) throw new Error('not found');
         return r.json();
       })
       .then(data => {
-        const entry = data[0];
+        if (data.type === 'disambiguation') {
+          throw new Error('disambiguation');
+        }
         let html = '<div class="definition-card"><div class="card">';
-        html += '<span class="word">' + escapeHTML(entry.word) + '</span>';
-        if (entry.phonetic) {
-          html += '<span class="phonetic">' + escapeHTML(entry.phonetic) + '</span>';
+        html += '<span class="word">' + escapeHTML(data.title) + '</span>';
+        if (data.description) {
+          html += '<span class="phonetic"> — ' + escapeHTML(data.description) + '</span>';
         }
-
-        // Show up to 3 meanings
-        const meanings = entry.meanings.slice(0, 3);
-        for (const m of meanings) {
-          html += '<div class="pos">' + escapeHTML(m.partOfSpeech) + '</div>';
-          const defs = m.definitions.slice(0, 2);
-          for (const d of defs) {
-            html += '<div class="def">' + escapeHTML(d.definition) + '</div>';
-            if (d.example) {
-              html += '<div class="example">"' + escapeHTML(d.example) + '"</div>';
-            }
-          }
+        html += '<div class="def" style="margin-top:.5rem">' + escapeHTML(data.extract) + '</div>';
+        if (data.content_urls && data.content_urls.desktop) {
+          html += '<div class="source"><a href="' + escapeHTML(data.content_urls.desktop.page) + '" target="_blank" style="color:#1a237e">Read more on Wikipedia</a></div>';
+        } else {
+          html += '<div class="source">via Wikipedia</div>';
         }
-
-        html += '<div class="source">via Free Dictionary API</div>';
         html += '</div></div>';
         definitionEl.innerHTML = html;
       })
       .catch(err => {
         if (err.name === 'AbortError') return;
-        definitionEl.innerHTML = '<div class="definition-card"><div class="card"><span class="error">No dictionary definition found for "' + escapeHTML(term) + '"</span></div></div>';
+        definitionEl.innerHTML = '<div class="definition-card"><div class="card"><span class="error">No definition found for "' + escapeHTML(term) + '"</span></div></div>';
       });
   }
 
